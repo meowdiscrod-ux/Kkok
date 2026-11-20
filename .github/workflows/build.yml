@@ -1962,8 +1962,9 @@ jobs:
           }
           PRESTIGE_EOF
 
-      - name: Build
-        run: gradle build
+      -       - name: Build
+        run: gradle build --console=plain 2>&1 | grep -B1 -A3 "error:" | head -80; exit ${PIPESTATUS[0]}
+        
 
       - uses: actions/upload-artifact@v4
         with:
