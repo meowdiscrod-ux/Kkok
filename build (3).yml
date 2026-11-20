@@ -1,0 +1,1973 @@
+name: Build Prestige
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.2.1
+
+      - name: Write project files
+        run: |
+          mkdir -p "$(dirname 'README.md')"
+          cat > 'README.md' <<'PRESTIGE_EOF'
+          # Prestige Client (Fabric 1.21.11)
+
+          Click GUI client: dark grey UI, purple + red accents, animated switches, sliders, dropdowns, search, keybinds, autosave.
+
+          ## Install
+          1. Install Fabric Loader 0.18.1+ for Minecraft 1.21.11 and **Fabric API** (0.141.x for 1.21.11).
+          2. Put `prestige-client-1.0.0.jar` in your `mods` folder.
+          3. Java 21 required.
+
+          ## Build with GitHub
+          Upload this folder to a repo (so `build.gradle` and `src/` are at the top level). The workflow in `.github/workflows/build.yml` builds it:
+          **Actions tab -> latest run -> Artifacts -> prestige-client**.
+
+          ## Open the menu
+          - PC: **Right Shift** (rebind in Controls)
+          - Phone/tablet: tap the **Prestige** button on the title screen or pause menu
+
+          ## Android (MJ Launcher / Pojav-based launchers)
+          Pick a Java 21 runtime, install Fabric Loader + Fabric API. The GUI uses only plain fills and text (no blur, no shaders) and only touch-friendly widgets. Keybinding and search typing need an on-screen/physical keyboard.
+
+          ## Modules
+          - Combat (read-only trainers, they never attack, aim, click, swap items or send packets): Mace Combo Timer, Reach Visualizer, Slam Timing Assistant, Reaction Trainer, Aim Trainer
+          - Movement: Sprint, Safe Walk (auto-sneak at ledges), Movement HUD
+          - Render: FPS Display, CPS Display, Keystrokes, Armor HUD, Target HUD
+          - Misc: Client Settings, Notifications, Module Manager
+
+          Settings save to `config/prestige.json`.
+
+          ## Dependencies
+          Minecraft 1.21.11, Fabric Loader >= 0.18.1, Fabric API 0.141.x, Java 21. Build: Gradle 9.2.1, Fabric Loom 1.14.
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'build.gradle')"
+          cat > 'build.gradle' <<'PRESTIGE_EOF'
+          plugins {
+              id 'fabric-loom' version "${loom_version}"
+          }
+
+          version = project.mod_version
+          group = project.maven_group
+
+          base {
+              archivesName = project.archives_base_name
+          }
+
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+          }
+
+          processResources {
+              inputs.property "version", project.version
+              filesMatching("fabric.mod.json") {
+                  expand "version": inputs.properties.version
+              }
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+              it.options.release = 21
+          }
+
+          java {
+              withSourcesJar()
+              sourceCompatibility = JavaVersion.VERSION_21
+              targetCompatibility = JavaVersion.VERSION_21
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'gradle.properties')"
+          cat > 'gradle.properties' <<'PRESTIGE_EOF'
+          org.gradle.jvmargs=-Xmx2G
+          org.gradle.parallel=true
+
+          minecraft_version=1.21.11
+          yarn_mappings=1.21.11+build.4
+          loader_version=0.18.4
+          loom_version=1.14-SNAPSHOT
+          fabric_version=0.141.3+1.21.11
+
+          mod_version=1.0.0
+          maven_group=prestige
+          archives_base_name=prestige-client
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'settings.gradle')"
+          cat > 'settings.gradle' <<'PRESTIGE_EOF'
+          pluginManagement {
+              repositories {
+                  maven { name = 'Fabric'; url = 'https://maven.fabricmc.net/' }
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/PrestigeClient.java')"
+          cat > 'src/main/java/prestige/PrestigeClient.java' <<'PRESTIGE_EOF'
+          package prestige;
+
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
+          import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+          import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+          import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
+          import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
+          import net.fabricmc.fabric.api.client.screen.v1.Screens;
+          import net.minecraft.client.gui.screen.GameMenuScreen;
+          import net.minecraft.client.gui.screen.TitleScreen;
+          import net.minecraft.client.option.KeyBinding;
+          import net.minecraft.client.util.InputUtil;
+          import net.minecraft.util.Identifier;
+          import org.lwjgl.glfw.GLFW;
+          import prestige.core.ConfigManager;
+          import prestige.core.Modules;
+          import prestige.core.Theme;
+          import prestige.gui.ClickGuiScreen;
+          import prestige.gui.Widgets;
+          import prestige.util.Anim;
+          import prestige.util.Mc;
+
+          public class PrestigeClient implements ClientModInitializer {
+              public static KeyBinding menuKey;
+              private static final KeyBinding.Category CATEGORY = KeyBinding.Category.create(Identifier.of("prestige", "main"));
+
+              @Override
+              public void onInitializeClient() {
+                  Modules.init();
+                  ConfigManager.load();
+
+                  // PC: Right Shift opens/closes the Click GUI (rebindable in Controls).
+                  menuKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                          "key.prestige.menu", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_RIGHT_SHIFT, CATEGORY));
+
+                  ClientTickEvents.END_CLIENT_TICK.register(client -> {
+                      while (menuKey.wasPressed()) {
+                          if (client.currentScreen == null) client.setScreen(new ClickGuiScreen(null));
+                      }
+                      Modules.tick(client);
+                  });
+
+                  // HUD (new Fabric HUD API)
+                  HudElementRegistry.addLast(Identifier.of("prestige", "hud"), (ctx, tickCounter) -> {
+                      net.minecraft.client.MinecraftClient mc = Mc.get();
+                      Anim.dt();
+                      if (mc.player == null || mc.options.hudHidden) return;
+                      Modules.frame(mc);
+                      Modules.renderHud(ctx, mc);
+                  });
+
+                  ClientLifecycleEvents.CLIENT_STOPPING.register(client -> ConfigManager.saveNow());
+
+                  // Phone/tablet: a "Prestige" button on the title and pause screens (no keyboard needed).
+                  ScreenEvents.AFTER_INIT.register((client, screen, w, h) -> {
+                      if (screen instanceof GameMenuScreen || screen instanceof TitleScreen) {
+                          Screens.getButtons(screen).add(new Widgets.TextButton(6, 6, 60, 18, "Prestige", Theme.PURPLE,
+                                  () -> client.setScreen(new ClickGuiScreen(screen))));
+                      }
+                  });
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/core/BoolSetting.java')"
+          cat > 'src/main/java/prestige/core/BoolSetting.java' <<'PRESTIGE_EOF'
+          package prestige.core;
+
+          public class BoolSetting extends Setting {
+              private boolean v;
+              public BoolSetting(String name, boolean def) { super(name); this.v = def; }
+              public boolean get() { return v; }
+              public void set(boolean b) { if (v != b) { v = b; ConfigManager.dirty(); } }
+              @Override public Object save() { return v; }
+              @Override public void load(Object o) { if (o instanceof Boolean b) v = b; }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/core/Category.java')"
+          cat > 'src/main/java/prestige/core/Category.java' <<'PRESTIGE_EOF'
+          package prestige.core;
+
+          public enum Category {
+              COMBAT("Combat"), MOVEMENT("Movement"), RENDER("Render"), MISC("Misc");
+              public final String label;
+              Category(String label) { this.label = label; }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/core/ClientModule.java')"
+          cat > 'src/main/java/prestige/core/ClientModule.java' <<'PRESTIGE_EOF'
+          package prestige.core;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.DrawContext;
+          import prestige.util.Mc;
+
+          import java.util.ArrayList;
+          import java.util.List;
+
+          public abstract class ClientModule {
+              public final String name, description;
+              public final Category category;
+              public boolean enabled;
+              public boolean alwaysOn;
+              public int key = -1;          // GLFW key code, -1 = unbound
+              public boolean keyDown;       // internal edge detection for keybinds
+              public float anim;            // GUI switch animation
+              public final List<Setting> settings = new ArrayList<>();
+
+              protected ClientModule(String name, String description, Category category) {
+                  this.name = name; this.description = description; this.category = category;
+              }
+
+              protected <T extends Setting> T add(T s) { settings.add(s); return s; }
+              protected MinecraftClient mc() { return Mc.get(); }
+
+              /** User toggle (GUI or keybind): shows a notification. */
+              public void toggle() {
+                  if (alwaysOn) return;
+                  setEnabled(!enabled);
+                  Notifications.toggled(this);
+              }
+
+              /** Silent enable/disable (used when loading config). */
+              public void setEnabled(boolean v) {
+                  if (alwaysOn) v = true;
+                  if (v == enabled) return;
+                  enabled = v;
+                  if (v) onEnable(); else onDisable();
+                  ConfigManager.dirty();
+              }
+
+              public void onEnable() {}
+              public void onDisable() {}
+              public void onTick(MinecraftClient mc) {}
+              public void onFrame(MinecraftClient mc) {}
+              public void addInfo(List<Line> out) {}
+              public void renderHud(DrawContext ctx, MinecraftClient mc) {}
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/core/ConfigManager.java')"
+          cat > 'src/main/java/prestige/core/ConfigManager.java' <<'PRESTIGE_EOF'
+          package prestige.core;
+
+          import com.google.gson.Gson;
+          import com.google.gson.GsonBuilder;
+          import net.fabricmc.loader.api.FabricLoader;
+
+          import java.io.Reader;
+          import java.io.Writer;
+          import java.nio.file.Files;
+          import java.nio.file.Path;
+          import java.util.LinkedHashMap;
+          import java.util.Map;
+
+          /** Autosaves to config/prestige.json (debounced, so dragging a slider does not spam the disk). */
+          public final class ConfigManager {
+              private ConfigManager() {}
+
+              private static class ModuleData {
+                  boolean enabled;
+                  int key = -1;
+                  Map<String, Object> settings = new LinkedHashMap<>();
+              }
+
+              private static class Data {
+                  Map<String, ModuleData> modules = new LinkedHashMap<>();
+              }
+
+              private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+              private static boolean dirty, loading;
+              private static long dirtyAt;
+
+              private static Path path() { return FabricLoader.getInstance().getConfigDir().resolve("prestige.json"); }
+
+              public static void dirty() {
+                  if (loading) return;
+                  dirty = true;
+                  dirtyAt = System.currentTimeMillis();
+              }
+
+              public static void tick() {
+                  if (dirty && System.currentTimeMillis() - dirtyAt > 1500) saveNow();
+              }
+
+              public static void load() {
+                  loading = true;
+                  try {
+                      if (Files.exists(path())) {
+                          Data d;
+                          try (Reader r = Files.newBufferedReader(path())) { d = GSON.fromJson(r, Data.class); }
+                          if (d != null && d.modules != null) {
+                              for (ClientModule m : Modules.ALL) {
+                                  ModuleData md = d.modules.get(m.name);
+                                  if (md == null) continue;
+                                  m.key = md.key;
+                                  if (md.settings != null) {
+                                      for (Setting s : m.settings) {
+                                          Object v = md.settings.get(s.name);
+                                          if (v != null) s.load(v);
+                                      }
+                                  }
+                                  m.setEnabled(md.enabled);
+                              }
+                          }
+                      }
+                  } catch (Exception ignored) {
+                  } finally {
+                      loading = false;
+                  }
+              }
+
+              public static void saveNow() {
+                  dirty = false;
+                  try {
+                      Data d = new Data();
+                      for (ClientModule m : Modules.ALL) {
+                          ModuleData md = new ModuleData();
+                          md.enabled = m.enabled;
+                          md.key = m.key;
+                          for (Setting s : m.settings) md.settings.put(s.name, s.save());
+                          d.modules.put(m.name, md);
+                      }
+                      Files.createDirectories(path().getParent());
+                      try (Writer w = Files.newBufferedWriter(path())) { GSON.toJson(d, w); }
+                  } catch (Exception ignored) {
+                  }
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/core/Line.java')"
+          cat > 'src/main/java/prestige/core/Line.java' <<'PRESTIGE_EOF'
+          package prestige.core;
+
+          public record Line(String text, int color) {}
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/core/ModeSetting.java')"
+          cat > 'src/main/java/prestige/core/ModeSetting.java' <<'PRESTIGE_EOF'
+          package prestige.core;
+
+          public class ModeSetting extends Setting {
+              public final String[] options;
+              private int index;
+
+              public ModeSetting(String name, int def, String... options) {
+                  super(name);
+                  this.options = options;
+                  this.index = Math.max(0, Math.min(def, options.length - 1));
+              }
+
+              public int index() { return index; }
+              public String get() { return options[index]; }
+              public boolean is(String s) { return options[index].equals(s); }
+              public void set(int i) { if (i >= 0 && i < options.length && i != index) { index = i; ConfigManager.dirty(); } }
+
+              @Override public Object save() { return options[index]; }
+              @Override public void load(Object o) {
+                  if (o instanceof String s) for (int i = 0; i < options.length; i++) if (options[i].equals(s)) index = i;
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/core/Modules.java')"
+          cat > 'src/main/java/prestige/core/Modules.java' <<'PRESTIGE_EOF'
+          package prestige.core;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.DrawContext;
+          import org.lwjgl.glfw.GLFW;
+          import prestige.modules.combat.*;
+          import prestige.modules.misc.*;
+          import prestige.modules.movement.*;
+          import prestige.modules.render.*;
+          import prestige.util.ClickTracker;
+          import prestige.util.FallTracker;
+          import prestige.util.Gfx;
+
+          import java.util.ArrayList;
+          import java.util.List;
+
+          public final class Modules {
+              private Modules() {}
+              public static final List<ClientModule> ALL = new ArrayList<>();
+
+              public static void init() {
+                  // Combat (read-only trainers)
+                  ALL.add(new MaceComboTrainer());
+                  ALL.add(new ReachVisualizer());
+                  ALL.add(new SlamTimingAssistant());
+                  ALL.add(new ReactionTrainer());
+                  ALL.add(new AimTrainer());
+                  // Movement
+                  ALL.add(new Sprint());
+                  ALL.add(new SafeWalk());
+                  ALL.add(new MovementHud());
+                  // Render
+                  ALL.add(new FpsDisplay());
+                  ALL.add(new CpsDisplay());
+                  ALL.add(new Keystrokes());
+                  ALL.add(new ArmorHud());
+                  ALL.add(new TargetHud());
+                  // Misc
+                  ALL.add(new ClientSettings());
+                  ALL.add(new NotificationsModule());
+                  ALL.add(new ModuleManagerModule());
+              }
+
+              @SuppressWarnings("unchecked")
+              public static <T extends ClientModule> T get(Class<T> c) {
+                  for (ClientModule m : ALL) if (c.isInstance(m)) return (T) m;
+                  return null;
+              }
+
+              public static void tick(MinecraftClient mc) {
+                  FallTracker.tick(mc);
+                  ConfigManager.tick();
+                  long h = mc.getWindow().getHandle();
+                  for (ClientModule m : ALL) {
+                      if (m.key >= 0) {
+                          boolean down = GLFW.glfwGetKey(h, m.key) == GLFW.GLFW_PRESS;
+                          if (down && !m.keyDown && mc.currentScreen == null && mc.player != null) m.toggle();
+                          m.keyDown = down;
+                      }
+                      if (m.enabled) m.onTick(mc);
+                  }
+              }
+
+              public static void frame(MinecraftClient mc) {
+                  ClickTracker.update(mc);
+                  for (ClientModule m : ALL) if (m.enabled) m.onFrame(mc);
+              }
+
+              public static void renderHud(DrawContext ctx, MinecraftClient mc) {
+                  List<Line> lines = new ArrayList<>();
+                  for (ClientModule m : ALL) if (m.enabled) m.addInfo(lines);
+                  if (!lines.isEmpty()) drawInfo(ctx, lines);
+                  for (ClientModule m : ALL) if (m.enabled) m.renderHud(ctx, mc);
+              }
+
+              private static void drawInfo(DrawContext ctx, List<Line> lines) {
+                  int maxW = 0;
+                  for (Line l : lines) maxW = Math.max(maxW, Gfx.width(l.text()));
+                  int x = 4, y = 4, w = maxW + 12, h = lines.size() * 10 + 6;
+                  Gfx.round(ctx, x, y, w, h, 4, 0xA00A0A0F);
+                  ctx.fill(x, y + 3, x + 2, y + h - 3, Theme.accent());
+                  int ty = y + 4;
+                  for (Line l : lines) {
+                      Gfx.text(ctx, l.text(), x + 8, ty, l.color());
+                      ty += 10;
+                  }
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/core/Notifications.java')"
+          cat > 'src/main/java/prestige/core/Notifications.java' <<'PRESTIGE_EOF'
+          package prestige.core;
+
+          import net.minecraft.client.gui.DrawContext;
+          import prestige.modules.misc.NotificationsModule;
+          import prestige.util.Anim;
+          import prestige.util.Gfx;
+
+          import java.util.ArrayDeque;
+
+          public final class Notifications {
+              private Notifications() {}
+
+              private record Toast(String text, int color, long start) {}
+              private static final ArrayDeque<Toast> TOASTS = new ArrayDeque<>();
+
+              public static void push(String text, int color) {
+                  if (!NotificationsModule.active()) return;
+                  TOASTS.addLast(new Toast(text, color, System.currentTimeMillis()));
+                  while (TOASTS.size() > 4) TOASTS.removeFirst();
+              }
+
+              public static void toggled(ClientModule m) {
+                  push(m.name + (m.enabled ? " enabled" : " disabled"), m.enabled ? Theme.GREEN : Theme.RED_T);
+              }
+
+              public static void render(DrawContext ctx, float lifeSeconds) {
+                  long now = System.currentTimeMillis();
+                  TOASTS.removeIf(t -> (now - t.start()) / 1000f > lifeSeconds);
+                  int w = ctx.getScaledWindowWidth();
+                  int i = 0;
+                  for (Toast t : TOASTS) {
+                      float age = (now - t.start()) / 1000f;
+                      float a = Math.min(1f, Math.min(age / 0.15f, (lifeSeconds - age) / 0.3f));
+                      if (a <= 0f) continue;
+                      int tw = Gfx.width(t.text()) + 18;
+                      int x = (w - tw) / 2;
+                      int y = 6 + i * 20 + Math.round((1f - Math.min(1f, age / 0.2f)) * -10f);
+                      Gfx.round(ctx, x, y, tw, 16, 4, Gfx.alpha(0xE00A0A0F, a));
+                      ctx.fill(x, y + 3, x + 2, y + 13, Gfx.alpha(t.color(), a));
+                      Gfx.text(ctx, t.text(), x + 9, y + 4, Gfx.alpha(Theme.TEXT, a));
+                      i++;
+                  }
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/core/NumberSetting.java')"
+          cat > 'src/main/java/prestige/core/NumberSetting.java' <<'PRESTIGE_EOF'
+          package prestige.core;
+
+          import java.util.Locale;
+
+          public class NumberSetting extends Setting {
+              public final double min, max, step;
+              private double v;
+
+              public NumberSetting(String name, double def, double min, double max, double step) {
+                  super(name);
+                  this.min = min; this.max = max; this.step = step; this.v = def;
+              }
+
+              public double get() { return v; }
+
+              public void set(double d) {
+                  d = Math.max(min, Math.min(max, d));
+                  if (step > 0) d = Math.round((d - min) / step) * step + min;
+                  d = Math.max(min, Math.min(max, d));
+                  if (d != v) { v = d; ConfigManager.dirty(); }
+              }
+
+              public double normalized() { return (v - min) / (max - min); }
+              public void setNormalized(double n) { set(min + n * (max - min)); }
+
+              public String format() {
+                  if (step >= 1) return String.valueOf((int) Math.round(v));
+                  return String.format(Locale.ROOT, step >= 0.1 ? "%.1f" : "%.2f", v);
+              }
+
+              @Override public Object save() { return v; }
+              @Override public void load(Object o) { if (o instanceof Number n) set(n.doubleValue()); }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/core/Setting.java')"
+          cat > 'src/main/java/prestige/core/Setting.java' <<'PRESTIGE_EOF'
+          package prestige.core;
+
+          public abstract class Setting {
+              public final String name;
+              protected Setting(String name) { this.name = name; }
+              public abstract Object save();
+              public abstract void load(Object o);
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/core/Theme.java')"
+          cat > 'src/main/java/prestige/core/Theme.java' <<'PRESTIGE_EOF'
+          package prestige.core;
+
+          import prestige.util.Gfx;
+
+          public final class Theme {
+              private Theme() {}
+              public static final int BG = 0xF00A0A0F, PANEL = 0xFF111118, CARD = 0xFF17171F, CARD_HOVER = 0xFF1F1F2A,
+                      CARD_SEL = 0xFF2A1F44, TEXT = 0xFFEDEDF5, MUTED = 0xFF8A8A9E, OFF = 0xFF3A3A48,
+                      PURPLE = 0xFF8B5CF6, RED = 0xFFEF4444, GREEN = 0xFF4ADE80, YELLOW = 0xFFFACC15, RED_T = 0xFFF87171;
+
+              /** 0 = purple, 1 = red, 2 = purple to red. */
+              public static int mode = 2;
+
+              public static int accent() { return mode == 1 ? RED : PURPLE; }
+              public static int accent2() { return mode == 0 ? PURPLE : RED; }
+              public static int at(float t) { return Gfx.lerp(accent(), accent2(), t); }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/gui/ClickGuiScreen.java')"
+          cat > 'src/main/java/prestige/gui/ClickGuiScreen.java' <<'PRESTIGE_EOF'
+          package prestige.gui;
+
+          import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.client.gui.widget.TextFieldWidget;
+          import net.minecraft.text.Text;
+          import org.lwjgl.glfw.GLFW;
+          import prestige.PrestigeClient;
+          import prestige.core.*;
+          import prestige.util.Anim;
+          import prestige.util.Gfx;
+          import prestige.util.Mc;
+
+          import java.util.ArrayList;
+          import java.util.List;
+          import java.util.Locale;
+
+          public class ClickGuiScreen extends Screen {
+              private static Category category = Category.COMBAT;
+              private static ClientModule selected;
+              private static String query = "";
+
+              private final Screen parent;
+              private int x0, y0, W, H, sideW, midW, midX, setX, setW, hidden;
+              private TextFieldWidget search;
+              private boolean needsRebuild, firstPoll = true, prevClose;
+              private ClientModule listening;
+              private int listenFrames;
+              private ModeSetting openMode;
+
+              public ClickGuiScreen(Screen parent) {
+                  super(Text.literal("Prestige"));
+                  this.parent = parent;
+                  Anim.open = 0f;
+              }
+
+              private List<ClientModule> visible() {
+                  List<ClientModule> out = new ArrayList<>();
+                  String q = query.trim().toLowerCase(Locale.ROOT);
+                  for (ClientModule m : Modules.ALL) {
+                      if (q.isEmpty() ? m.category == category : m.name.toLowerCase(Locale.ROOT).contains(q)) out.add(m);
+                  }
+                  return out;
+              }
+
+              @Override
+              protected void init() {
+                  W = Math.min(width - 8, 380);
+                  H = Math.min(height - 8, 236);
+                  x0 = (width - W) / 2;
+                  y0 = (height - H) / 2;
+                  sideW = 66;
+                  midW = (int) ((W - sideW) * 0.46f);
+                  midX = x0 + sideW;
+                  setX = midX + midW;
+                  setW = W - sideW - midW;
+
+                  addDrawableChild(new Widgets.TextButton(x0 + W - 24, y0 + 6, 18, 14, "x", 0xFF3A1D24, this::close));
+
+                  // categories
+                  int cy = y0 + 34;
+                  for (Category c : Category.values()) {
+                      addDrawableChild(new Widgets.CategoryButton(x0 + 6, cy, sideW - 10, 18, c,
+                              () -> query.isEmpty() && c == category,
+                              () -> { category = c; query = ""; selected = null; openMode = null; needsRebuild = true; }));
+                      cy += 22;
+                  }
+
+                  // search
+                  boolean hadFocus = search != null && search.isFocused();
+                  search = new TextFieldWidget(textRenderer, midX + 10, y0 + 25, midW - 20, 12, Text.literal("Search"));
+                  search.setDrawsBackground(false);
+                  search.setMaxLength(24);
+                  search.setPlaceholder(Text.literal("Search modules..."));
+                  search.setText(query);
+                  search.setChangedListener(s -> {
+                      if (!s.equals(query)) { query = s; selected = null; openMode = null; needsRebuild = true; }
+                  });
+                  addDrawableChild(search);
+                  if (hadFocus) setFocused(search);
+
+                  // module list
+                  List<ClientModule> list = visible();
+                  if (selected == null || !list.contains(selected)) selected = list.isEmpty() ? null : list.get(0);
+                  int rowH = 20, gap = 3, listY = y0 + 46;
+                  int maxRows = Math.max(1, (y0 + H - 14 - listY) / (rowH + gap));
+                  hidden = Math.max(0, list.size() - maxRows);
+                  for (int i = 0; i < Math.min(list.size(), maxRows); i++) {
+                      ClientModule m = list.get(i);
+                      int ry = listY + i * (rowH + gap);
+                      int rx = midX + 6, rw = midW - 12;
+                      addDrawableChild(new Widgets.SwitchHit(rx + rw - 30, ry, 28, rowH, m));
+                      addDrawableChild(new Widgets.ModuleRow(rx, ry, rw, rowH, m, () -> selected == m,
+                              () -> { selected = m; openMode = null; needsRebuild = true; }));
+                  }
+
+                  // settings panel
+                  if (selected != null) {
+                      final ClientModule sel = selected;
+                      int sx = setX + 8, sw = setW - 16, sy = y0 + 40, limit = y0 + H - 8;
+                      addDrawableChild(new Widgets.BindRow(sx, sy, sw, 18, sel, () -> listening == sel,
+                              () -> { listening = sel; listenFrames = 0; }));
+                      sy += 22;
+                      for (Setting s : sel.settings) {
+                          if (sy > limit - 18) break;
+                          if (s instanceof BoolSetting b) {
+                              addDrawableChild(new Widgets.BoolRow(sx, sy, sw, 18, b));
+                              sy += 22;
+                          } else if (s instanceof NumberSetting n) {
+                              addDrawableChild(new Widgets.SliderRow(sx, sy, sw, 22, n));
+                              sy += 26;
+                          } else if (s instanceof ModeSetting md) {
+                              addDrawableChild(new Widgets.ModeRow(sx, sy, sw, 18, md, () -> openMode == md,
+                                      () -> { openMode = openMode == md ? null : md; needsRebuild = true; }));
+                              sy += 22;
+                              if (openMode == md) {
+                                  for (int i = 0; i < md.options.length; i++) {
+                                      final int idx = i;
+                                      addDrawableChild(new Widgets.OptionRow(sx + 8, sy, sw - 16, 14, md, idx,
+                                              () -> { md.set(idx); openMode = null; needsRebuild = true; }));
+                                      sy += 16;
+                                  }
+                                  sy += 4;
+                              }
+                          }
+                      }
+                  }
+              }
+
+              private void pollKeys() {
+                  long h = Mc.window();
+                  int closeCode = KeyBindingHelper.getBoundKeyOf(PrestigeClient.menuKey).getCode();
+                  boolean down = GLFW.glfwGetKey(h, closeCode) == GLFW.GLFW_PRESS;
+                  if (firstPoll) { prevClose = down; firstPoll = false; }
+                  else if (down && !prevClose && listening == null && !(search != null && search.isFocused())) { close(); return; }
+                  prevClose = down;
+
+                  if (listening != null) {
+                      listenFrames++;
+                      if (listenFrames > 8) {
+                          for (int k = 32; k <= 348; k++) {
+                              if (k == closeCode || GLFW.glfwGetKey(h, k) != GLFW.GLFW_PRESS) continue;
+                              listening.key = (k == 259 || k == 261) ? -1 : k;  // Backspace / Delete clears
+                              ConfigManager.dirty();
+                              listening = null;
+                              break;
+                          }
+                      }
+                  }
+              }
+
+              @Override
+              public void render(DrawContext ctx, int mouseX, int mouseY, float delta) {
+                  if (needsRebuild) { needsRebuild = false; clearAndInit(); }
+                  Anim.open = Anim.approach(Anim.open, 1f, 14f);
+                  float a = Anim.open;
+                  pollKeys();
+
+                  ctx.fill(0, 0, width, height, Gfx.alpha(0xAA000000, a));
+                  Gfx.round(ctx, x0, y0, W, H, 7, Gfx.alpha(Theme.BG, a));
+                  Gfx.round(ctx, x0 + 3, y0 + 3, sideW - 3, H - 6, 5, Gfx.alpha(Theme.PANEL, a));
+                  Gfx.gradientText(ctx, "PRESTIGE", x0 + 9, y0 + 12, a);
+
+                  // search box
+                  Gfx.round(ctx, midX + 6, y0 + 21, midW - 12, 20, 4, Gfx.alpha(Theme.CARD, a));
+
+                  // divider between list and settings
+                  ctx.fill(setX, y0 + 8, setX + 1, y0 + H - 8, Gfx.alpha(0xFF23232F, a));
+
+                  // settings header
+                  if (selected != null) {
+                      Gfx.text(ctx, selected.name, setX + 10, y0 + 10, Gfx.alpha(Theme.TEXT, a));
+                      String d = Mc.tr().trimToWidth(selected.description, setW - 20);
+                      Gfx.text(ctx, d, setX + 10, y0 + 22, Gfx.alpha(Theme.MUTED, a));
+                  }
+                  if (hidden > 0) {
+                      Gfx.text(ctx, "+" + hidden + " more (search)", midX + 10, y0 + H - 12, Gfx.alpha(Theme.MUTED, a));
+                  } else {
+                      Gfx.text(ctx, "Combat = read-only trainers", x0 + 7, y0 + H - 13, Gfx.alpha(0xFF5C5C70, a));
+                  }
+
+                  super.render(ctx, mouseX, mouseY, delta);
+              }
+
+              // No vanilla blur: keeps the GUI cheap on phones.
+              @Override
+              public void renderBackground(DrawContext ctx, int mouseX, int mouseY, float delta) {}
+
+              @Override
+              public boolean shouldPause() { return false; }
+
+              @Override
+              public void close() {
+                  ConfigManager.saveNow();
+                  client.setScreen(parent);
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/gui/Widgets.java')"
+          cat > 'src/main/java/prestige/gui/Widgets.java' <<'PRESTIGE_EOF'
+          package prestige.gui;
+
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.gui.widget.ButtonWidget;
+          import net.minecraft.client.gui.widget.SliderWidget;
+          import net.minecraft.text.Text;
+          import prestige.core.*;
+          import prestige.util.Anim;
+          import prestige.util.Gfx;
+          import prestige.util.Keys;
+          import prestige.util.Mc;
+
+          import java.util.function.BooleanSupplier;
+
+          /** Custom-painted widgets. They extend vanilla widgets, so touch, drag and mouse input work everywhere. */
+          public final class Widgets {
+              private Widgets() {}
+
+              private static int a(int color) { return Gfx.alpha(color, Anim.open); }
+
+              private static void card(DrawContext ctx, int x, int y, int w, int h, float hover, float sel) {
+                  int bg = Gfx.lerp(Theme.CARD, Theme.CARD_HOVER, hover);
+                  bg = Gfx.lerp(bg, Theme.CARD_SEL, sel);
+                  Gfx.round(ctx, x, y, w, h, 4, a(bg));
+                  if (sel > 0.01f) ctx.fill(x, y + 4, x + 2, y + h - 4, Gfx.alpha(Theme.accent(), Anim.open * sel));
+              }
+
+              private static int ty(int y, int h) { return y + (h - 8) / 2; }
+
+              public static class TextButton extends ButtonWidget {
+                  private final String label;
+                  private final int color;
+                  private float hv;
+
+                  public TextButton(int x, int y, int w, int h, String label, int color, Runnable press) {
+                      super(x, y, w, h, Text.literal(label), b -> press.run(), DEFAULT_NARRATION_SUPPLIER);
+                      this.label = label; this.color = color;
+                  }
+
+                  @Override
+                  public void renderWidget(DrawContext ctx, int mx, int my, float d) {
+                      hv = Anim.approach(hv, isHovered() ? 1f : 0f, 16f);
+                      Gfx.round(ctx, getX(), getY(), getWidth(), getHeight(), 4, Gfx.alpha(Gfx.lerp(color, 0xFFFFFFFF, hv * 0.2f), Math.max(Anim.open, 0.0f) == 0 ? 1f : Anim.open));
+                      Gfx.text(ctx, label, getX() + (getWidth() - Gfx.width(label)) / 2, ty(getY(), getHeight()), 0xFFFFFFFF);
+                  }
+              }
+
+              public static class CategoryButton extends ButtonWidget {
+                  private final Category c;
+                  private final BooleanSupplier sel;
+                  private float hv, sv;
+
+                  public CategoryButton(int x, int y, int w, int h, Category c, BooleanSupplier sel, Runnable press) {
+                      super(x, y, w, h, Text.literal(c.label), b -> press.run(), DEFAULT_NARRATION_SUPPLIER);
+                      this.c = c; this.sel = sel;
+                  }
+
+                  @Override
+                  public void renderWidget(DrawContext ctx, int mx, int my, float d) {
+                      hv = Anim.approach(hv, isHovered() ? 1f : 0f, 16f);
+                      sv = Anim.approach(sv, sel.getAsBoolean() ? 1f : 0f, 14f);
+                      card(ctx, getX(), getY(), getWidth(), getHeight(), hv, sv);
+                      Gfx.text(ctx, c.label, getX() + 9, ty(getY(), getHeight()), a(Gfx.lerp(Theme.MUTED, Theme.TEXT, Math.max(hv, sv))));
+                  }
+              }
+
+              /** Invisible hit area over the switch. Added BEFORE the row so it receives the click first. */
+              public static class SwitchHit extends ButtonWidget {
+                  public SwitchHit(int x, int y, int w, int h, ClientModule m) {
+                      super(x, y, w, h, Text.empty(), b -> m.toggle(), DEFAULT_NARRATION_SUPPLIER);
+                  }
+
+                  @Override
+                  public void renderWidget(DrawContext ctx, int mx, int my, float d) {}
+              }
+
+              public static class ModuleRow extends ButtonWidget {
+                  private final ClientModule m;
+                  private final BooleanSupplier sel;
+                  private float hv, sv;
+
+                  public ModuleRow(int x, int y, int w, int h, ClientModule m, BooleanSupplier sel, Runnable press) {
+                      super(x, y, w, h, Text.literal(m.name), b -> press.run(), DEFAULT_NARRATION_SUPPLIER);
+                      this.m = m; this.sel = sel;
+                  }
+
+                  @Override
+                  public void renderWidget(DrawContext ctx, int mx, int my, float d) {
+                      hv = Anim.approach(hv, isHovered() ? 1f : 0f, 16f);
+                      sv = Anim.approach(sv, sel.getAsBoolean() ? 1f : 0f, 14f);
+                      m.anim = Anim.approach(m.anim, m.enabled ? 1f : 0f, 14f);
+                      card(ctx, getX(), getY(), getWidth(), getHeight(), hv, sv);
+                      Gfx.text(ctx, m.name, getX() + 8, ty(getY(), getHeight()),
+                              a(Gfx.lerp(Theme.MUTED, Theme.TEXT, Math.max(m.anim, Math.max(hv, sv)))));
+                      if (!m.alwaysOn) Gfx.toggle(ctx, getX() + getWidth() - 30, getY() + (getHeight() - 12) / 2, m.anim, Anim.open);
+                  }
+              }
+
+              public static class BindRow extends ButtonWidget {
+                  private final ClientModule m;
+                  private final BooleanSupplier listening;
+                  private float hv;
+
+                  public BindRow(int x, int y, int w, int h, ClientModule m, BooleanSupplier listening, Runnable press) {
+                      super(x, y, w, h, Text.literal("Bind"), b -> press.run(), DEFAULT_NARRATION_SUPPLIER);
+                      this.m = m; this.listening = listening;
+                  }
+
+                  @Override
+                  public void renderWidget(DrawContext ctx, int mx, int my, float d) {
+                      hv = Anim.approach(hv, isHovered() ? 1f : 0f, 16f);
+                      card(ctx, getX(), getY(), getWidth(), getHeight(), hv, listening.getAsBoolean() ? 1f : 0f);
+                      Gfx.text(ctx, "Keybind", getX() + 8, ty(getY(), getHeight()), a(Theme.TEXT));
+                      String v = listening.getAsBoolean() ? "Press a key..." : Keys.name(m.key);
+                      Gfx.text(ctx, v, getX() + getWidth() - 8 - Gfx.width(v), ty(getY(), getHeight()), a(Theme.accent()));
+                  }
+              }
+
+              public static class BoolRow extends ButtonWidget {
+                  private final BoolSetting s;
+                  private float hv, sv;
+
+                  public BoolRow(int x, int y, int w, int h, BoolSetting s) {
+                      super(x, y, w, h, Text.literal(s.name), b -> s.set(!s.get()), DEFAULT_NARRATION_SUPPLIER);
+                      this.s = s; this.sv = s.get() ? 1f : 0f;
+                  }
+
+                  @Override
+                  public void renderWidget(DrawContext ctx, int mx, int my, float d) {
+                      hv = Anim.approach(hv, isHovered() ? 1f : 0f, 16f);
+                      sv = Anim.approach(sv, s.get() ? 1f : 0f, 14f);
+                      card(ctx, getX(), getY(), getWidth(), getHeight(), hv, 0f);
+                      Gfx.text(ctx, s.name, getX() + 8, ty(getY(), getHeight()), a(Theme.TEXT));
+                      Gfx.toggle(ctx, getX() + getWidth() - 30, getY() + (getHeight() - 12) / 2, sv, Anim.open);
+                  }
+              }
+
+              public static class SliderRow extends SliderWidget {
+                  private final NumberSetting s;
+                  private float disp, hv;
+
+                  public SliderRow(int x, int y, int w, int h, NumberSetting s) {
+                      super(x, y, w, h, Text.empty(), s.normalized());
+                      this.s = s;
+                      this.disp = (float) s.normalized();
+                      updateMessage();
+                  }
+
+                  @Override
+                  protected void updateMessage() {
+                      if (s == null) return;
+                      setMessage(Text.literal(s.name + ": " + s.format()));
+                  }
+
+                  @Override
+                  protected void applyValue() { s.setNormalized(this.value); }
+
+                  @Override
+                  public void renderWidget(DrawContext ctx, int mx, int my, float d) {
+                      hv = Anim.approach(hv, isHovered() ? 1f : 0f, 16f);
+                      disp = Anim.approach(disp, (float) this.value, 22f);
+                      int x = getX(), y = getY(), w = getWidth(), h = getHeight();
+                      card(ctx, x, y, w, h, hv, 0f);
+                      Gfx.text(ctx, s.name, x + 8, y + 4, a(Theme.TEXT));
+                      String v = s.format();
+                      Gfx.text(ctx, v, x + w - 8 - Gfx.width(v), y + 4, a(Theme.accent()));
+                      int tx = x + 8, tw = w - 16, tyy = y + h - 7;
+                      Gfx.round(ctx, tx, tyy, tw, 3, 1, a(Theme.OFF));
+                      int fw = Math.max(2, Math.round(tw * disp));
+                      Gfx.round(ctx, tx, tyy, fw, 3, 1, a(Theme.accent()));
+                      Gfx.round(ctx, tx + fw - 3, tyy - 2, 6, 7, 3, a(0xFFFFFFFF));
+                  }
+              }
+
+              public static class ModeRow extends ButtonWidget {
+                  private final ModeSetting s;
+                  private final BooleanSupplier open;
+                  private float hv;
+
+                  public ModeRow(int x, int y, int w, int h, ModeSetting s, BooleanSupplier open, Runnable press) {
+                      super(x, y, w, h, Text.literal(s.name), b -> press.run(), DEFAULT_NARRATION_SUPPLIER);
+                      this.s = s; this.open = open;
+                  }
+
+                  @Override
+                  public void renderWidget(DrawContext ctx, int mx, int my, float d) {
+                      hv = Anim.approach(hv, isHovered() ? 1f : 0f, 16f);
+                      card(ctx, getX(), getY(), getWidth(), getHeight(), hv, open.getAsBoolean() ? 1f : 0f);
+                      Gfx.text(ctx, s.name, getX() + 8, ty(getY(), getHeight()), a(Theme.TEXT));
+                      String v = s.get() + (open.getAsBoolean() ? " ^" : " v");
+                      Gfx.text(ctx, v, getX() + getWidth() - 8 - Gfx.width(v), ty(getY(), getHeight()), a(Theme.accent()));
+                  }
+              }
+
+              public static class OptionRow extends ButtonWidget {
+                  private final ModeSetting s;
+                  private final int idx;
+                  private float hv;
+
+                  public OptionRow(int x, int y, int w, int h, ModeSetting s, int idx, Runnable press) {
+                      super(x, y, w, h, Text.literal(s.options[idx]), b -> press.run(), DEFAULT_NARRATION_SUPPLIER);
+                      this.s = s; this.idx = idx;
+                  }
+
+                  @Override
+                  public void renderWidget(DrawContext ctx, int mx, int my, float d) {
+                      hv = Anim.approach(hv, isHovered() ? 1f : 0f, 16f);
+                      boolean cur = s.index() == idx;
+                      Gfx.round(ctx, getX(), getY(), getWidth(), getHeight(), 3, a(Gfx.lerp(0xFF101018, Theme.CARD_HOVER, hv)));
+                      Gfx.text(ctx, s.options[idx], getX() + 8, ty(getY(), getHeight()), a(cur ? Theme.accent() : Theme.MUTED));
+                  }
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/modules/combat/AimTrainer.java')"
+          cat > 'src/main/java/prestige/modules/combat/AimTrainer.java' <<'PRESTIGE_EOF'
+          package prestige.modules.combat;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.network.ClientPlayerEntity;
+          import net.minecraft.entity.LivingEntity;
+          import net.minecraft.util.math.MathHelper;
+          import net.minecraft.util.math.Vec3d;
+          import prestige.core.*;
+          import prestige.util.Anim;
+          import prestige.util.Targets;
+
+          import java.util.List;
+          import java.util.Locale;
+
+          /**
+           * Read-only aim practice stats for VISIBLE targets: shows your crosshair offset and tracking accuracy.
+           * It never moves your camera, never attacks, and sends nothing to the server.
+           */
+          public class AimTrainer extends ClientModule {
+              private final NumberSetting range = add(new NumberSetting("Range", 10, 4, 16, 1));
+              private final NumberSetting sensitivity = add(new NumberSetting("Smoothing", 8, 1, 20, 1));
+              private final NumberSetting tolerance = add(new NumberSetting("Tolerance (deg)", 4, 1, 15, 1));
+              private boolean has;
+              private float dYaw, dPitch, sYaw, sPitch, acc;
+              private boolean onTarget;
+
+              public AimTrainer() {
+                  super("Aim Trainer", "Read-only aim offset and tracking accuracy.", Category.COMBAT);
+              }
+
+              @Override
+              public void onFrame(MinecraftClient mc) {
+                  ClientPlayerEntity p = mc.player;
+                  has = false;
+                  if (p == null) return;
+                  LivingEntity t = Targets.nearestVisible(mc, range.get());
+                  if (t == null) return;
+                  Vec3d to = t.getBoundingBox().getCenter().subtract(p.getEyePos());
+                  double horiz = Math.sqrt(to.x * to.x + to.z * to.z);
+                  float tYaw = (float) (Math.atan2(-to.x, to.z) * 180.0 / Math.PI);
+                  float tPitch = (float) (-Math.atan2(to.y, horiz) * 180.0 / Math.PI);
+                  dYaw = MathHelper.wrapDegrees(tYaw - p.getYaw());
+                  dPitch = tPitch - p.getPitch();
+                  float rate = (float) sensitivity.get();
+                  sYaw = Anim.approach(sYaw, dYaw, rate);
+                  sPitch = Anim.approach(sPitch, dPitch, rate);
+                  onTarget = Math.hypot(dYaw, dPitch) <= tolerance.get();
+                  acc += ((onTarget ? 1f : 0f) - acc) * 0.02f;
+                  has = true;
+              }
+
+              @Override
+              public void addInfo(List<Line> out) {
+                  if (!has) { out.add(new Line("Aim: no visible target", Theme.MUTED)); return; }
+                  out.add(new Line(onTarget ? "Aim: ON TARGET" : "Aim: off target", onTarget ? Theme.GREEN : Theme.YELLOW));
+                  out.add(new Line(String.format(Locale.ROOT, "Offset %.1f / %.1f deg", sYaw, sPitch), Theme.TEXT));
+                  out.add(new Line("Tracking " + Math.round(acc * 100) + "%", Theme.MUTED));
+              }
+
+              @Override
+              public void renderHud(DrawContext ctx, MinecraftClient mc) {
+                  if (!has) return;
+                  int cx = ctx.getScaledWindowWidth() / 2, cy = ctx.getScaledWindowHeight() / 2;
+                  int px = cx + Math.round(MathHelper.clamp(sYaw * 2f, -30f, 30f));
+                  int py = cy + Math.round(MathHelper.clamp(sPitch * 2f, -30f, 30f));
+                  ctx.fill(px - 1, py - 1, px + 2, py + 2, onTarget ? Theme.GREEN : Theme.accent());
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/modules/combat/MaceComboTrainer.java')"
+          cat > 'src/main/java/prestige/modules/combat/MaceComboTrainer.java' <<'PRESTIGE_EOF'
+          package prestige.modules.combat;
+
+          import net.minecraft.client.network.ClientPlayerEntity;
+          import net.minecraft.item.Items;
+          import prestige.core.*;
+          import prestige.util.FallTracker;
+
+          import java.util.List;
+          import java.util.Locale;
+
+          /** Read-only: shows fall distance, smash bonus estimate and attack cooldown. Never attacks or switches items. */
+          public class MaceComboTrainer extends ClientModule {
+              private final NumberSetting minFall = add(new NumberSetting("Min Fall", 1.5, 0, 10, 0.5));
+              private final BoolSetting needMace = add(new BoolSetting("Require Mace", true));
+
+              public MaceComboTrainer() {
+                  super("Mace Combo Timer", "Read-only readout: fall, smash bonus, cooldown.", Category.COMBAT);
+              }
+
+              @Override
+              public void addInfo(List<Line> out) {
+                  ClientPlayerEntity p = mc().player;
+                  if (p == null) return;
+                  boolean mace = p.getMainHandStack().isOf(Items.MACE);
+                  float cd = p.getAttackCooldownProgress(0f);
+                  double fall = FallTracker.fall;
+                  boolean ready = (mace || !needMace.get()) && fall >= minFall.get() && cd >= 0.95f;
+                  out.add(new Line("Mace Combo: " + (ready ? "READY" : "wait"), ready ? Theme.GREEN : Theme.YELLOW));
+                  out.add(new Line(String.format(Locale.ROOT, "Fall %.1fm  Smash +%.1f", fall, FallTracker.smash(fall)), Theme.TEXT));
+                  out.add(new Line("Cooldown " + Math.round(cd * 100) + "%", cd >= 0.95f ? Theme.GREEN : Theme.MUTED));
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/modules/combat/ReachVisualizer.java')"
+          cat > 'src/main/java/prestige/modules/combat/ReachVisualizer.java' <<'PRESTIGE_EOF'
+          package prestige.modules.combat;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.entity.LivingEntity;
+          import prestige.core.*;
+          import prestige.util.Gfx;
+          import prestige.util.Targets;
+
+          import java.util.List;
+          import java.util.Locale;
+
+          /** Read-only: shows distance to the nearest target and whether it is inside the reach you set. Does NOT extend reach. */
+          public class ReachVisualizer extends ClientModule {
+              private final NumberSetting reach = add(new NumberSetting("Weapon Reach", 3.0, 2.0, 6.0, 0.1));
+              private LivingEntity target;
+              private double dist;
+
+              public ReachVisualizer() {
+                  super("Reach Visualizer", "Read-only distance readout vs your weapon's reach.", Category.COMBAT);
+              }
+
+              @Override
+              public void onFrame(MinecraftClient mc) {
+                  if (mc.player == null) { target = null; return; }
+                  LivingEntity t = Targets.crosshair(mc);
+                  if (t == null) t = Targets.nearestVisible(mc, 8.0);
+                  target = t;
+                  if (t != null) dist = Targets.hitboxDistance(mc.player, t);
+              }
+
+              @Override
+              public void addInfo(List<Line> out) {
+                  if (target == null) { out.add(new Line("Reach: no target", Theme.MUTED)); return; }
+                  boolean in = dist <= reach.get();
+                  out.add(new Line(String.format(Locale.ROOT, "Reach %.2f / %.2fm", dist, reach.get()), in ? Theme.GREEN : Theme.RED_T));
+              }
+
+              @Override
+              public void renderHud(DrawContext ctx, MinecraftClient mc) {
+                  if (target == null) return;
+                  int cx = ctx.getScaledWindowWidth() / 2, cy = ctx.getScaledWindowHeight() / 2;
+                  int w = 60, x = cx - w / 2, y = cy + 14;
+                  double scale = reach.get() * 1.5;
+                  ctx.fill(x, y, x + w, y + 3, 0x90101018);
+                  int fill = (int) Math.min(w, w * dist / scale);
+                  ctx.fill(x, y, x + fill, y + 3, dist <= reach.get() ? Theme.GREEN : Theme.RED_T);
+                  int mark = (int) (w * reach.get() / scale);
+                  ctx.fill(x + mark, y - 2, x + mark + 1, y + 5, 0xFFFFFFFF);
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/modules/combat/ReactionTrainer.java')"
+          cat > 'src/main/java/prestige/modules/combat/ReactionTrainer.java' <<'PRESTIGE_EOF'
+          package prestige.modules.combat;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.entity.LivingEntity;
+          import prestige.core.*;
+          import prestige.util.Targets;
+
+          import java.util.List;
+
+          /** Read-only: measures how fast you click after a target lands under your crosshair. It never clicks for you. */
+          public class ReactionTrainer extends ClientModule {
+              private LivingEntity last;
+              private long detectNs;
+              private boolean waiting, prevDown;
+              private double lastMs = -1, bestMs = -1, sumMs;
+              private int count;
+
+              public ReactionTrainer() {
+                  super("Reaction Trainer", "Read-only reaction-time stats on crosshair targets.", Category.COMBAT);
+              }
+
+              @Override
+              public void onDisable() { last = null; waiting = false; }
+
+              @Override
+              public void onFrame(MinecraftClient mc) {
+                  if (mc.player == null) return;
+                  LivingEntity c = Targets.crosshair(mc);
+                  if (c == null) { waiting = false; last = null; }
+                  else if (c != last) { last = c; detectNs = System.nanoTime(); waiting = true; }
+
+                  boolean down = mc.options.attackKey.isPressed();
+                  if (down && !prevDown && waiting) {
+                      double ms = (System.nanoTime() - detectNs) / 1_000_000.0;
+                      lastMs = ms;
+                      bestMs = bestMs < 0 ? ms : Math.min(bestMs, ms);
+                      sumMs += ms; count++;
+                      waiting = false;
+                  }
+                  prevDown = down;
+              }
+
+              @Override
+              public void addInfo(List<Line> out) {
+                  out.add(new Line(waiting ? "Reaction: GO" : "Reaction: idle", waiting ? Theme.GREEN : Theme.MUTED));
+                  if (count > 0) {
+                      out.add(new Line("Last " + Math.round(lastMs) + "ms  Best " + Math.round(bestMs) + "ms", Theme.TEXT));
+                      out.add(new Line("Avg " + Math.round(sumMs / count) + "ms (" + count + ")", Theme.MUTED));
+                  }
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/modules/combat/SlamTimingAssistant.java')"
+          cat > 'src/main/java/prestige/modules/combat/SlamTimingAssistant.java' <<'PRESTIGE_EOF'
+          package prestige.modules.combat;
+
+          import net.minecraft.block.BlockState;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.network.ClientPlayerEntity;
+          import net.minecraft.util.math.BlockPos;
+          import net.minecraft.util.math.Direction;
+          import net.minecraft.util.shape.VoxelShape;
+          import net.minecraft.world.World;
+          import prestige.core.*;
+          import prestige.util.FallTracker;
+
+          import java.util.List;
+          import java.util.Locale;
+
+          /** Read-only: estimates time to ground impact and smash bonus. Never swings or changes items. */
+          public class SlamTimingAssistant extends ClientModule {
+              private final NumberSetting window = add(new NumberSetting("Window (ticks)", 4, 1, 10, 1));
+              private double gap = -1;
+              private int ticks = -1;
+              private double predictedFall;
+
+              public SlamTimingAssistant() {
+                  super("Slam Timing Assistant", "Read-only impact timer and smash estimate.", Category.COMBAT);
+              }
+
+              @Override
+              public void onTick(MinecraftClient mc) {
+                  gap = -1; ticks = -1;
+                  ClientPlayerEntity p = mc.player;
+                  World w = mc.world;
+                  if (p == null || w == null || p.isOnGround()) return;
+
+                  BlockPos.Mutable pos = new BlockPos.Mutable();
+                  double top = Double.NaN;
+                  for (int i = 0; i < 64; i++) {
+                      pos.set(p.getX(), p.getY() - i, p.getZ());
+                      BlockState st = w.getBlockState(pos);
+                      VoxelShape sh = st.getCollisionShape(w, pos);
+                      if (!sh.isEmpty()) {
+                          double t = pos.getY() + sh.getMax(Direction.Axis.Y);
+                          if (t <= p.getY() + 0.001) { top = t; break; }
+                      }
+                  }
+                  if (Double.isNaN(top)) return;
+                  gap = p.getY() - top;
+                  double y = p.getY(), vy = p.getVelocity().y;
+                  int t = 0;
+                  while (y > top && t < 200) { y += vy; vy = (vy - 0.08) * 0.98; t++; }
+                  ticks = t;
+                  predictedFall = Math.max(0, FallTracker.peakY - top);
+              }
+
+              @Override
+              public void addInfo(List<Line> out) {
+                  if (ticks < 0) { out.add(new Line("Slam: on ground / no drop", Theme.MUTED)); return; }
+                  boolean now = ticks <= window.get();
+                  out.add(new Line(String.format(Locale.ROOT, "Impact ~%d ticks (%.1fm)", ticks, gap), now ? Theme.GREEN : Theme.YELLOW));
+                  out.add(new Line(String.format(Locale.ROOT, "Smash at impact +%.1f", FallTracker.smash(predictedFall)), Theme.TEXT));
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/modules/misc/ClientSettings.java')"
+          cat > 'src/main/java/prestige/modules/misc/ClientSettings.java' <<'PRESTIGE_EOF'
+          package prestige.modules.misc;
+
+          import net.minecraft.client.MinecraftClient;
+          import prestige.core.*;
+          import prestige.util.Anim;
+
+          public class ClientSettings extends ClientModule {
+              private final ModeSetting theme = add(new ModeSetting("Theme", 2, "Purple", "Red", "Purple + Red"));
+              private final NumberSetting animSpeed = add(new NumberSetting("Animation Speed", 1.0, 0.5, 2.0, 0.1));
+
+              public ClientSettings() {
+                  super("Client Settings", "Theme and animation speed.", Category.MISC);
+                  alwaysOn = true;
+                  enabled = true;
+              }
+
+              @Override
+              public void onTick(MinecraftClient mc) { apply(); }
+
+              @Override
+              public void onEnable() { apply(); }
+
+              private void apply() {
+                  Theme.mode = theme.index();
+                  Anim.speed = (float) animSpeed.get();
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/modules/misc/ModuleManagerModule.java')"
+          cat > 'src/main/java/prestige/modules/misc/ModuleManagerModule.java' <<'PRESTIGE_EOF'
+          package prestige.modules.misc;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.DrawContext;
+          import prestige.core.*;
+          import prestige.util.Gfx;
+
+          import java.util.ArrayList;
+          import java.util.List;
+
+          /** Shows the list of enabled modules on screen. Toggle modules from the Click GUI. */
+          public class ModuleManagerModule extends ClientModule {
+              private final ModeSetting side = add(new ModeSetting("Side", 0, "Right", "Left"));
+
+              public ModuleManagerModule() {
+                  super("Module Manager", "On-screen list of enabled modules.", Category.MISC);
+                  enabled = true;
+              }
+
+              @Override
+              public void renderHud(DrawContext ctx, MinecraftClient mc) {
+                  List<String> names = new ArrayList<>();
+                  for (ClientModule m : Modules.ALL) if (m.enabled && !m.alwaysOn && m != this) names.add(m.name);
+                  names.sort((x, y) -> Gfx.width(y) - Gfx.width(x));
+                  int w = ctx.getScaledWindowWidth();
+                  boolean right = side.is("Right");
+                  int y = 4;
+                  for (String s : names) {
+                      int tw = Gfx.width(s);
+                      int x = right ? w - tw - 8 : 4;
+                      Gfx.round(ctx, x - 3, y - 1, tw + 8, 11, 3, 0x900A0A0F);
+                      ctx.fill(right ? w - 3 : 4, y, right ? w - 1 : 6, y + 9, Theme.accent());
+                      Gfx.text(ctx, s, right ? x : x + 4, y, Theme.TEXT);
+                      y += 12;
+                  }
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/modules/misc/NotificationsModule.java')"
+          cat > 'src/main/java/prestige/modules/misc/NotificationsModule.java' <<'PRESTIGE_EOF'
+          package prestige.modules.misc;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.DrawContext;
+          import prestige.core.*;
+
+          public class NotificationsModule extends ClientModule {
+              private static NotificationsModule instance;
+              private final NumberSetting duration = add(new NumberSetting("Duration (s)", 2.0, 1.0, 5.0, 0.5));
+
+              public NotificationsModule() {
+                  super("Notifications", "Pop-ups when modules are toggled.", Category.MISC);
+                  enabled = true;
+                  instance = this;
+              }
+
+              public static boolean active() { return instance != null && instance.enabled; }
+
+              @Override
+              public void renderHud(DrawContext ctx, MinecraftClient mc) {
+                  Notifications.render(ctx, (float) duration.get());
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/modules/movement/MovementHud.java')"
+          cat > 'src/main/java/prestige/modules/movement/MovementHud.java' <<'PRESTIGE_EOF'
+          package prestige.modules.movement;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.network.ClientPlayerEntity;
+          import prestige.core.*;
+
+          import java.util.List;
+          import java.util.Locale;
+
+          public class MovementHud extends ClientModule {
+              private final BoolSetting coords = add(new BoolSetting("Show Coordinates", true));
+              private double lastX, lastZ, speed;
+              private boolean init;
+
+              public MovementHud() {
+                  super("Movement HUD", "Speed, state and coordinates.", Category.MOVEMENT);
+              }
+
+              @Override
+              public void onTick(MinecraftClient mc) {
+                  ClientPlayerEntity p = mc.player;
+                  if (p == null) { init = false; return; }
+                  if (init) speed = Math.hypot(p.getX() - lastX, p.getZ() - lastZ) * 20.0;
+                  lastX = p.getX(); lastZ = p.getZ(); init = true;
+              }
+
+              @Override
+              public void addInfo(List<Line> out) {
+                  ClientPlayerEntity p = mc().player;
+                  if (p == null) return;
+                  String state = p.isSneaking() ? "Sneaking" : p.isSprinting() ? "Sprinting" : p.isOnGround() ? "Walking" : "Airborne";
+                  out.add(new Line(String.format(Locale.ROOT, "Speed %.1f b/s  %s", speed, state), Theme.TEXT));
+                  if (coords.get()) out.add(new Line(String.format(Locale.ROOT, "XYZ %.0f %.0f %.0f", p.getX(), p.getY(), p.getZ()), Theme.MUTED));
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/modules/movement/SafeWalk.java')"
+          cat > 'src/main/java/prestige/modules/movement/SafeWalk.java' <<'PRESTIGE_EOF'
+          package prestige.modules.movement;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.network.ClientPlayerEntity;
+          import net.minecraft.util.math.BlockPos;
+          import net.minecraft.util.math.Vec3d;
+          import net.minecraft.world.World;
+          import prestige.core.*;
+          import prestige.util.Keys;
+
+          /** Auto-sneaks at block edges so you do not walk off. Uses the normal sneak key (no mixins). */
+          public class SafeWalk extends ClientModule {
+              private final NumberSetting lookahead = add(new NumberSetting("Edge Distance", 0.45, 0.2, 1.0, 0.05));
+              private boolean forced;
+
+              public SafeWalk() {
+                  super("Safe Walk", "Sneaks automatically at ledges.", Category.MOVEMENT);
+              }
+
+              @Override
+              public void onTick(MinecraftClient mc) {
+                  ClientPlayerEntity p = mc.player;
+                  World w = mc.world;
+                  if (p == null || w == null) return;
+                  boolean edge = false;
+                  Vec3d v = p.getVelocity();
+                  double sp = Math.hypot(v.x, v.z);
+                  if (p.isOnGround() && sp > 0.01) {
+                      double l = lookahead.get() + sp * 2.0;
+                      BlockPos b = BlockPos.ofFloored(p.getX() + v.x / sp * l, p.getY() - 0.5, p.getZ() + v.z / sp * l);
+                      edge = w.getBlockState(b).getCollisionShape(w, b).isEmpty();
+                  }
+                  if (edge) {
+                      mc.options.sneakKey.setPressed(true);
+                      forced = true;
+                  } else if (forced) {
+                      mc.options.sneakKey.setPressed(Keys.physicallyDown(mc.options.sneakKey));
+                      forced = false;
+                  }
+              }
+
+              @Override
+              public void onDisable() {
+                  if (forced) {
+                      MinecraftClient mc = mc();
+                      mc.options.sneakKey.setPressed(Keys.physicallyDown(mc.options.sneakKey));
+                      forced = false;
+                  }
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/modules/movement/Sprint.java')"
+          cat > 'src/main/java/prestige/modules/movement/Sprint.java' <<'PRESTIGE_EOF'
+          package prestige.modules.movement;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.network.ClientPlayerEntity;
+          import prestige.core.*;
+
+          /** Automatic sprint while moving forward (same as vanilla toggle sprint). */
+          public class Sprint extends ClientModule {
+              public Sprint() {
+                  super("Sprint", "Keeps you sprinting while you move forward.", Category.MOVEMENT);
+              }
+
+              @Override
+              public void onTick(MinecraftClient mc) {
+                  ClientPlayerEntity p = mc.player;
+                  if (p == null) return;
+                  if (mc.options.forwardKey.isPressed() && !p.isSneaking() && !p.horizontalCollision
+                          && !p.isUsingItem() && p.getHungerManager().getFoodLevel() > 6) {
+                      p.setSprinting(true);
+                  }
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/modules/render/ArmorHud.java')"
+          cat > 'src/main/java/prestige/modules/render/ArmorHud.java' <<'PRESTIGE_EOF'
+          package prestige.modules.render;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.entity.EquipmentSlot;
+          import net.minecraft.item.ItemStack;
+          import prestige.core.*;
+          import prestige.util.Gfx;
+
+          public class ArmorHud extends ClientModule {
+              private final BoolSetting durability = add(new BoolSetting("Show Durability %", true));
+              private static final EquipmentSlot[] SLOTS = {EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET};
+
+              public ArmorHud() {
+                  super("Armor HUD", "Armor pieces and durability on screen.", Category.RENDER);
+              }
+
+              @Override
+              public void renderHud(DrawContext ctx, MinecraftClient mc) {
+                  if (mc.player == null) return;
+                  int w = ctx.getScaledWindowWidth(), h = ctx.getScaledWindowHeight();
+                  int x = w - 22, y = h / 2 - 40;
+                  for (EquipmentSlot s : SLOTS) {
+                      ItemStack st = mc.player.getEquippedStack(s);
+                      if (!st.isEmpty()) {
+                          ctx.drawItem(st, x, y);
+                          if (durability.get() && st.isDamageable()) {
+                              int max = st.getMaxDamage();
+                              int pct = max <= 0 ? 100 : (max - st.getDamage()) * 100 / max;
+                              String t = pct + "%";
+                              int col = pct > 50 ? Theme.GREEN : pct > 20 ? Theme.YELLOW : Theme.RED_T;
+                              Gfx.textShadow(ctx, t, x - 4 - Gfx.width(t), y + 4, col);
+                          }
+                      }
+                      y += 20;
+                  }
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/modules/render/CpsDisplay.java')"
+          cat > 'src/main/java/prestige/modules/render/CpsDisplay.java' <<'PRESTIGE_EOF'
+          package prestige.modules.render;
+
+          import prestige.core.*;
+          import prestige.util.ClickTracker;
+
+          import java.util.List;
+
+          public class CpsDisplay extends ClientModule {
+              public CpsDisplay() {
+                  super("CPS Display", "Clicks per second (left | right).", Category.RENDER);
+              }
+
+              @Override
+              public void addInfo(List<Line> out) {
+                  out.add(new Line("CPS " + ClickTracker.left() + " | " + ClickTracker.right(), Theme.TEXT));
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/modules/render/FpsDisplay.java')"
+          cat > 'src/main/java/prestige/modules/render/FpsDisplay.java' <<'PRESTIGE_EOF'
+          package prestige.modules.render;
+
+          import prestige.core.*;
+
+          import java.util.List;
+
+          public class FpsDisplay extends ClientModule {
+              public FpsDisplay() {
+                  super("FPS Display", "Shows your frame rate.", Category.RENDER);
+                  enabled = true;
+              }
+
+              @Override
+              public void addInfo(List<Line> out) {
+                  int fps = mc().getCurrentFps();
+                  out.add(new Line("FPS " + fps, fps >= 60 ? Theme.GREEN : fps >= 30 ? Theme.YELLOW : Theme.RED_T));
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/modules/render/Keystrokes.java')"
+          cat > 'src/main/java/prestige/modules/render/Keystrokes.java' <<'PRESTIGE_EOF'
+          package prestige.modules.render;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.DrawContext;
+          import prestige.core.*;
+          import prestige.util.Anim;
+          import prestige.util.Gfx;
+
+          public class Keystrokes extends ClientModule {
+              private final float[] a = new float[8];
+
+              public Keystrokes() {
+                  super("Keystrokes", "On-screen WASD, space and mouse buttons.", Category.RENDER);
+              }
+
+              @Override
+              public void renderHud(DrawContext ctx, MinecraftClient mc) {
+                  int h = ctx.getScaledWindowHeight();
+                  int bx = 6, by = h - 6 - 74;
+                  box(ctx, 0, "W", bx + 20, by, 18, 18, mc.options.forwardKey.isPressed());
+                  box(ctx, 1, "A", bx, by + 20, 18, 18, mc.options.leftKey.isPressed());
+                  box(ctx, 2, "S", bx + 20, by + 20, 18, 18, mc.options.backKey.isPressed());
+                  box(ctx, 3, "D", bx + 40, by + 20, 18, 18, mc.options.rightKey.isPressed());
+                  box(ctx, 4, "LMB", bx, by + 40, 29, 16, mc.options.attackKey.isPressed());
+                  box(ctx, 5, "RMB", bx + 31, by + 40, 29, 16, mc.options.useKey.isPressed());
+                  box(ctx, 6, "SPACE", bx, by + 58, 60, 12, mc.options.jumpKey.isPressed());
+              }
+
+              private void box(DrawContext ctx, int i, String label, int x, int y, int w, int h, boolean down) {
+                  a[i] = Anim.approach(a[i], down ? 1f : 0f, 22f);
+                  int bg = Gfx.lerp(0xA00A0A0F, Gfx.alpha(Theme.accent(), 0.85f), a[i]);
+                  Gfx.round(ctx, x, y, w, h, 3, bg);
+                  Gfx.text(ctx, label, x + (w - Gfx.width(label)) / 2, y + (h - 8) / 2, Gfx.lerp(Theme.MUTED, 0xFFFFFFFF, a[i]));
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/modules/render/TargetHud.java')"
+          cat > 'src/main/java/prestige/modules/render/TargetHud.java' <<'PRESTIGE_EOF'
+          package prestige.modules.render;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.entity.LivingEntity;
+          import prestige.core.*;
+          import prestige.util.Anim;
+          import prestige.util.Gfx;
+          import prestige.util.Targets;
+
+          import java.util.Locale;
+
+          public class TargetHud extends ClientModule {
+              private final NumberSetting hold = add(new NumberSetting("Hold Time (s)", 2.0, 0.5, 5.0, 0.5));
+              private LivingEntity target;
+              private long lastSeen;
+              private float shown, vis;
+
+              public TargetHud() {
+                  super("Target HUD", "Name, health, distance and armor of your target.", Category.RENDER);
+              }
+
+              @Override
+              public void renderHud(DrawContext ctx, MinecraftClient mc) {
+                  if (mc.player == null) return;
+                  long now = System.currentTimeMillis();
+                  LivingEntity c = Targets.crosshair(mc);
+                  if (c != null) {
+                      if (c != target) { target = c; shown = c.getHealth(); }
+                      lastSeen = now;
+                  }
+                  boolean show = target != null && target.isAlive() && now - lastSeen < hold.get() * 1000;
+                  vis = Anim.approach(vis, show ? 1f : 0f, 12f);
+                  if (vis < 0.02f) { if (!show) target = null; return; }
+                  if (target == null) return;
+
+                  float hp = target.getHealth(), max = Math.max(1f, target.getMaxHealth());
+                  shown = Anim.approach(shown, hp, 8f);
+
+                  int w = ctx.getScaledWindowWidth(), h = ctx.getScaledWindowHeight();
+                  int pw = 132, ph = 38, px = w / 2 - pw / 2, py = h / 2 + 28;
+                  Gfx.round(ctx, px, py, pw, ph, 5, Gfx.alpha(0xD00A0A0F, vis));
+                  ctx.fill(px, py + 5, px + 2, py + ph - 5, Gfx.alpha(Theme.accent(), vis));
+
+                  String name = Mc_trim(target.getName().getString(), pw - 16);
+                  Gfx.text(ctx, name, px + 8, py + 5, Gfx.alpha(Theme.TEXT, vis));
+                  String info = String.format(Locale.ROOT, "HP %.1f/%.1f  %.1fm  AR %d", hp, max, mc.player.distanceTo(target), target.getArmor());
+                  Gfx.text(ctx, Mc_trim(info, pw - 16), px + 8, py + 16, Gfx.alpha(Theme.MUTED, vis));
+
+                  int bx = px + 8, by = py + ph - 9, bw = pw - 16;
+                  Gfx.round(ctx, bx, by, bw, 4, 2, Gfx.alpha(Theme.OFF, vis));
+                  float frac = Math.max(0f, Math.min(1f, shown / max));
+                  int fw = Math.max(2, Math.round(bw * frac));
+                  Gfx.round(ctx, bx, by, fw, 4, 2, Gfx.alpha(Gfx.lerp(Theme.RED_T, Theme.GREEN, frac), vis));
+              }
+
+              private static String Mc_trim(String s, int width) { return prestige.util.Mc.tr().trimToWidth(s, width); }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/util/Anim.java')"
+          cat > 'src/main/java/prestige/util/Anim.java' <<'PRESTIGE_EOF'
+          package prestige.util;
+
+          /** Frame-time based easing. Shared dt so every widget animates at the same speed. */
+          public final class Anim {
+              private Anim() {}
+              public static float open = 0f;   // GUI fade 0..1
+              public static float speed = 1f;  // set from Client Settings
+              private static long last = System.nanoTime();
+              private static float dt = 0.016f;
+
+              public static float dt() {
+                  long now = System.nanoTime();
+                  if (now - last > 2_000_000L) {
+                      dt = Math.min(0.1f, (now - last) / 1_000_000_000f);
+                      last = now;
+                  }
+                  return dt;
+              }
+
+              public static float approach(float cur, float target, float rate) {
+                  float k = 1f - (float) Math.exp(-rate * speed * dt());
+                  return cur + (target - cur) * k;
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/util/ClickTracker.java')"
+          cat > 'src/main/java/prestige/util/ClickTracker.java' <<'PRESTIGE_EOF'
+          package prestige.util;
+
+          import net.minecraft.client.MinecraftClient;
+
+          import java.util.ArrayDeque;
+
+          /** Per-frame click edge detection, used by CPS and Keystrokes. Bounded: old clicks are pruned every frame. */
+          public final class ClickTracker {
+              private ClickTracker() {}
+              private static final ArrayDeque<Long> L = new ArrayDeque<>();
+              private static final ArrayDeque<Long> R = new ArrayDeque<>();
+              private static boolean pl, pr;
+
+              public static void update(MinecraftClient mc) {
+                  long now = System.currentTimeMillis();
+                  boolean l = mc.options.attackKey.isPressed();
+                  boolean r = mc.options.useKey.isPressed();
+                  if (l && !pl) L.addLast(now);
+                  if (r && !pr) R.addLast(now);
+                  pl = l; pr = r;
+                  while (!L.isEmpty() && now - L.peekFirst() > 1000) L.removeFirst();
+                  while (!R.isEmpty() && now - R.peekFirst() > 1000) R.removeFirst();
+              }
+
+              public static int left() { return L.size(); }
+              public static int right() { return R.size(); }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/util/FallTracker.java')"
+          cat > 'src/main/java/prestige/util/FallTracker.java' <<'PRESTIGE_EOF'
+          package prestige.util;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.network.ClientPlayerEntity;
+
+          /** Tracks how far the player has fallen (read-only). */
+          public final class FallTracker {
+              private FallTracker() {}
+              public static double peakY, fall;
+              public static boolean air;
+
+              public static void tick(MinecraftClient mc) {
+                  ClientPlayerEntity p = mc.player;
+                  if (p == null) { air = false; fall = 0; return; }
+                  if (p.isOnGround() || p.isTouchingWater() || p.isClimbing()) {
+                      air = false; fall = 0; peakY = p.getY();
+                  } else {
+                      if (!air) { air = true; peakY = p.getY(); }
+                      if (p.getY() > peakY) peakY = p.getY();
+                      fall = Math.max(0, peakY - p.getY());
+                  }
+              }
+
+              /** Estimated mace smash bonus damage for a given fall distance. */
+              public static double smash(double f) {
+                  return Math.min(f, 3) * 4 + Math.min(Math.max(f - 3, 0), 5) * 2 + Math.max(f - 8, 0);
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/util/Gfx.java')"
+          cat > 'src/main/java/prestige/util/Gfx.java' <<'PRESTIGE_EOF'
+          package prestige.util;
+
+          import net.minecraft.client.gui.DrawContext;
+          import prestige.core.Theme;
+
+          public final class Gfx {
+              private Gfx() {}
+
+              public static int alpha(int c, float a) {
+                  a = Math.max(0f, Math.min(1f, a));
+                  int al = Math.round(((c >>> 24) & 0xFF) * a);
+                  return (al << 24) | (c & 0xFFFFFF);
+              }
+
+              public static int lerp(int a, int b, float t) {
+                  t = Math.max(0f, Math.min(1f, t));
+                  int aa = (int) (((a >>> 24) & 255) + (((b >>> 24) & 255) - ((a >>> 24) & 255)) * t);
+                  int ar = (int) (((a >> 16) & 255) + (((b >> 16) & 255) - ((a >> 16) & 255)) * t);
+                  int ag = (int) (((a >> 8) & 255) + (((b >> 8) & 255) - ((a >> 8) & 255)) * t);
+                  int ab = (int) ((a & 255) + ((b & 255) - (a & 255)) * t);
+                  return (aa << 24) | (ar << 16) | (ag << 8) | ab;
+              }
+
+              /** Rounded rectangle from plain fills (cheap, works everywhere). */
+              public static void round(DrawContext ctx, int x, int y, int w, int h, int r, int color) {
+                  r = Math.max(0, Math.min(r, Math.min(w, h) / 2));
+                  if (r == 0) { ctx.fill(x, y, x + w, y + h, color); return; }
+                  ctx.fill(x, y + r, x + w, y + h - r, color);
+                  for (int i = 0; i < r; i++) {
+                      double dy = r - i - 0.5;
+                      int inset = r - (int) Math.round(Math.sqrt(r * r - dy * dy));
+                      ctx.fill(x + inset, y + i, x + w - inset, y + i + 1, color);
+                      ctx.fill(x + inset, y + h - i - 1, x + w - inset, y + h - i, color);
+                  }
+              }
+
+              public static void text(DrawContext ctx, String s, int x, int y, int color) {
+                  ctx.drawText(Mc.tr(), s, x, y, color, false);
+              }
+
+              public static void textShadow(DrawContext ctx, String s, int x, int y, int color) {
+                  ctx.drawText(Mc.tr(), s, x, y, color, true);
+              }
+
+              public static int width(String s) { return Mc.tr().getWidth(s); }
+
+              public static void gradientText(DrawContext ctx, String s, int x, int y, float a) {
+                  int cx = x;
+                  for (int i = 0; i < s.length(); i++) {
+                      String ch = String.valueOf(s.charAt(i));
+                      float t = s.length() <= 1 ? 0f : i / (float) (s.length() - 1);
+                      text(ctx, ch, cx, y, alpha(Theme.at(t), a));
+                      cx += width(ch);
+                  }
+              }
+
+              public static void toggle(DrawContext ctx, int x, int y, float anim, float alphaMul) {
+                  int track = lerp(Theme.OFF, Theme.accent(), anim);
+                  round(ctx, x, y, 24, 12, 6, alpha(track, alphaMul));
+                  round(ctx, x + 2 + Math.round(anim * 12), y + 2, 8, 8, 4, alpha(0xFFFFFFFF, alphaMul));
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/util/Keys.java')"
+          cat > 'src/main/java/prestige/util/Keys.java' <<'PRESTIGE_EOF'
+          package prestige.util;
+
+          import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+          import net.minecraft.client.option.KeyBinding;
+          import net.minecraft.client.util.InputUtil;
+          import org.lwjgl.glfw.GLFW;
+
+          public final class Keys {
+              private Keys() {}
+
+              public static String name(int key) {
+                  if (key < 0) return "None";
+                  switch (key) {
+                      case 32: return "Space";
+                      case 256: return "Esc";
+                      case 257: return "Enter";
+                      case 258: return "Tab";
+                      case 259: return "Backspace";
+                      case 262: return "Right";
+                      case 263: return "Left";
+                      case 264: return "Down";
+                      case 265: return "Up";
+                      case 340: return "L-Shift";
+                      case 344: return "R-Shift";
+                      case 341: return "L-Ctrl";
+                      case 345: return "R-Ctrl";
+                      case 342: return "L-Alt";
+                      case 346: return "R-Alt";
+                      default:
+                  }
+                  if (key >= 290 && key <= 301) return "F" + (key - 289);
+                  if (key >= 320 && key <= 329) return "Num " + (key - 320);
+                  String n = GLFW.glfwGetKeyName(key, 0);
+                  if (n != null && !n.isEmpty()) return n.toUpperCase();
+                  return "Key " + key;
+              }
+
+              /** True if the physical key bound to this KeyBinding is held (ignores forced state). */
+              public static boolean physicallyDown(KeyBinding kb) {
+                  InputUtil.Key k = KeyBindingHelper.getBoundKeyOf(kb);
+                  long h = Mc.window();
+                  if (k.getCategory() == InputUtil.Type.KEYSYM) return GLFW.glfwGetKey(h, k.getCode()) == GLFW.GLFW_PRESS;
+                  if (k.getCategory() == InputUtil.Type.MOUSE) return GLFW.glfwGetMouseButton(h, k.getCode()) == GLFW.GLFW_PRESS;
+                  return false;
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/util/Mc.java')"
+          cat > 'src/main/java/prestige/util/Mc.java' <<'PRESTIGE_EOF'
+          package prestige.util;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.font.TextRenderer;
+
+          public final class Mc {
+              private Mc() {}
+              public static MinecraftClient get() { return MinecraftClient.getInstance(); }
+              public static TextRenderer tr() { return MinecraftClient.getInstance().textRenderer; }
+              public static long window() { return MinecraftClient.getInstance().getWindow().getHandle(); }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/java/prestige/util/Targets.java')"
+          cat > 'src/main/java/prestige/util/Targets.java' <<'PRESTIGE_EOF'
+          package prestige.util;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.network.ClientPlayerEntity;
+          import net.minecraft.entity.Entity;
+          import net.minecraft.entity.LivingEntity;
+          import net.minecraft.entity.decoration.ArmorStandEntity;
+          import net.minecraft.util.math.Box;
+          import net.minecraft.util.math.MathHelper;
+          import net.minecraft.util.math.Vec3d;
+
+          /** Read-only target lookups for HUD and trainer modules. */
+          public final class Targets {
+              private Targets() {}
+
+              public static LivingEntity crosshair(MinecraftClient mc) {
+                  Entity e = mc.targetedEntity;
+                  if (e instanceof LivingEntity le && le != mc.player && le.isAlive() && !(le instanceof ArmorStandEntity)) return le;
+                  return null;
+              }
+
+              public static LivingEntity nearestVisible(MinecraftClient mc, double range) {
+                  if (mc.world == null || mc.player == null) return null;
+                  LivingEntity best = null;
+                  double bd = range * range;
+                  for (Entity e : mc.world.getEntities()) {
+                      if (!(e instanceof LivingEntity le) || le == mc.player || !le.isAlive() || le instanceof ArmorStandEntity) continue;
+                      double d = mc.player.squaredDistanceTo(le);
+                      if (d < bd && mc.player.canSee(le)) { bd = d; best = le; }
+                  }
+                  return best;
+              }
+
+              /** Distance from the player's eyes to the closest point of the entity's hitbox. */
+              public static double hitboxDistance(ClientPlayerEntity p, Entity e) {
+                  Vec3d eye = p.getEyePos();
+                  Box b = e.getBoundingBox();
+                  double dx = eye.x - MathHelper.clamp(eye.x, b.minX, b.maxX);
+                  double dy = eye.y - MathHelper.clamp(eye.y, b.minY, b.maxY);
+                  double dz = eye.z - MathHelper.clamp(eye.z, b.minZ, b.maxZ);
+                  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+              }
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/resources/assets/prestige/lang/en_us.json')"
+          cat > 'src/main/resources/assets/prestige/lang/en_us.json' <<'PRESTIGE_EOF'
+          {
+            "key.prestige.menu": "Open Prestige menu",
+            "key.category.prestige.main": "Prestige Client"
+          }
+          PRESTIGE_EOF
+          mkdir -p "$(dirname 'src/main/resources/fabric.mod.json')"
+          cat > 'src/main/resources/fabric.mod.json' <<'PRESTIGE_EOF'
+          {
+            "schemaVersion": 1,
+            "id": "prestige",
+            "version": "${version}",
+            "name": "Prestige Client",
+            "description": "Click GUI client with HUD, movement and render modules. Combat modules are read-only trainers.",
+            "authors": ["Prestige"],
+            "license": "MIT",
+            "environment": "client",
+            "entrypoints": { "client": ["prestige.PrestigeClient"] },
+            "depends": {
+              "fabricloader": ">=0.18.1",
+              "minecraft": "~1.21.11",
+              "java": ">=21",
+              "fabric-api": "*"
+            }
+          }
+          PRESTIGE_EOF
+
+      - name: Build
+        run: gradle build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prestige-client
+          path: |
+            build/libs/*.jar
+            !build/libs/*-sources.jar
